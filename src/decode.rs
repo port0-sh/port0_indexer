@@ -1,7 +1,7 @@
 //! Pool state decode from the RPC account response.
 //!
 //! The Rust port of the SDK's `pool/decoding.ts` and `pool/reads.ts`. The pool
-//! stores eleven value slots; reserves equal the vault balances of token0 and
+//! stores ten value slots; reserves equal the vault balances of token0 and
 //! token1 minus the protocol pot.
 
 use anyhow::{Context, Result, anyhow};

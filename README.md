@@ -1,9 +1,9 @@
 # miden_xyk_indexer
 
 Pool indexer for the MidenXYK AMM. Reads the chain through the node RPC only:
-no Miden client, no store, no keystore. Polls the on-chain registry for pool
-ids and each pool for state, keeps a bounded in-memory history, and serves the
-result over HTTP.
+no Miden client, no keystore. Polls the on-chain registry for pool ids and each
+pool for state, keeps a bounded history in SQLite, and serves the result over
+HTTP.
 
 For the full stack bring-up and the pool deployment flow, see
 `../miden_xyk_app/RUNBOOK.md`.
@@ -17,10 +17,12 @@ precedence, and a missing file is not an error.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MIDEN_RPC_URL` | `https://rpc.testnet.miden.io` | Node RPC endpoint |
-| `MIDEN_XYC_REGISTRY_ID` | required | Registry account id, hex or bech32 |
+| `MIDEN_XYC_REGISTRY_ID` | required | Registry account id, hex |
 | `INDEXER_LISTEN` | `0.0.0.0:8080` | HTTP listen address |
-| `POOL_POLL_SECS` | `15` | Pool poll interval |
+| `POOL_POLL_SECS` | `15` | Scheduler tick in seconds, clamped to `1..=5`; per-pool cadence is internal |
 | `REGISTRY_POLL_SECS` | `60` | Registry poll interval |
+| `INDEXER_DB` | `miden_xyk_indexer.sqlite` | SQLite path; empty or `off` keeps the index in RAM only |
+| `INDEXER_SNAPSHOT_RETENTION` | (empty) | Empty prunes each resolution to its window; `all` keeps every bucket |
 | `RUST_LOG` | `miden_xyk_indexer=info` | Tracing filter |
 
 ## Endpoints
@@ -111,14 +113,17 @@ a year. `INDEXER_SNAPSHOT_RETENTION=all` keeps every bucket instead.
 
 ## Capacity
 
-Measured row costs, 10,000 pools, one year. The snapshot count is arithmetic on
-the resolutions (525,600 + 105,120 + 8,760 rows per pool per year = 639,480);
-the byte figures are the measured 360.3 and 97.4 bytes per row.
+Measured row costs, 10,000 pools, one year. Retention runs five tiers: 1m for
+12 h, 5m for 7 d, 1h for 30 d, 6h for 180 d, and 1d forever. The per-pool row
+counts are arithmetic on those windows (720 + 2,016 + 720 + 720 bounded, plus
+365/year daily); the byte figures are the measured 360.3 and 97.4 bytes per row.
+`INDEXER_SNAPSHOT_RETENTION=all` keeps every bucket, whose per-pool yearly count
+is 525,600 + 105,120 + 8,760 + 1,460 + 365 = 641,305.
 
-| Policy | Snapshot rows/year | Snapshot storage/year |
+| Policy | Snapshot rows | Snapshot storage |
 | --- | --- | --- |
-| Keep every bucket | 6.39e9 | 2.30 TB |
-| Default (RAM window, 1,656 rows/pool) | 1.66e7 total | 5.97 GB total |
+| Keep every bucket | 6.41e9/year | 2.31 TB/year |
+| Default (bounded tiers) | 4.18e7 total | 15.05 GB, +1.32 GB/year |
 
 Activity rows are one per state change, so they scale with trading, not with
 time alone: at 100 / 1,000 / 10,000 activities per pool per day the year costs
@@ -131,10 +136,10 @@ What breaks first, in order:
 | --- | --- |
 | Registry read | The node does not return a storage map above 1,000 entries inline. The `pools` map is one map, so the pool set stops being readable at 1,001 pools, long before 10,000. Needs `SyncAccountStorageMaps` paging or a sharded registry. |
 | RPC rate | Polling 10,000 pools per 15 s is 667 `get_account` calls per second, each also carrying the pool's storage maps and vault. Not serviceable by a public node. Needs event- or block-driven fetching instead of a full sweep. |
-| Indexer RAM | The in-memory model holds 1,656 snapshots and up to 4,096 activities per pool with no global cap: about 3-5 GB of snapshots and 3.3 GB of activity ring at 10,000 pools. The process breaks before the disk does. |
-| API payload | `GET /pools` returns every pool (order 1 KB each): 10 MB per request, polled by the home page every 15 s. Needs paging. |
-| Disk | 2.30 TB/year under `INDEXER_SNAPSHOT_RETENTION=all`. `VACUUM` needs a second copy, so retention has to drop tables or partitions, not rows. `DELETE` never returns space to the filesystem. |
-| Browser | 10,000 rows re-rendered every 15 s. Needs virtualization or paging. |
+| Indexer RAM | The in-memory model keeps one open bucket per tier (5 snapshots) and up to 4,096 activities per pool with no global cap. At 10,000 pools the activity ring dominates at about 3.3 GB; the snapshots are negligible. The process breaks before the disk does. |
+| API payload | `GET /pools` returns one page (default 50, maximum 500 entries, order 1 KB each). A client that walks every cursor re-reads 10 MB per sweep. |
+| Disk | 2.31 TB/year under `INDEXER_SNAPSHOT_RETENTION=all`. `VACUUM` needs a second copy, so retention has to drop tables or partitions, not rows. `DELETE` never returns space to the filesystem. |
+| Browser | 10,000 rows re-rendered every 15 s once the user has loaded every page. The first page is 50 rows; full expansion needs virtualization. |
 
 ## Polling
 
@@ -162,11 +167,12 @@ that trips either gets `429` with `Retry-After`.
 
 ## Model
 
-- A point is appended only when a tracked field changes; within a bucket the
+- A point is appended on every applied fetch, changed or not, so the last bucket advances and a chart gets one candle per interval; within a bucket the
   last point replaces the previous one, while the bucket's opening state and its
-  price extremes carry over, so a snapshot doubles as a candle. Three
-  resolutions are retained per pool: 1 minute for 360 points, 5 minutes for 576,
-  1 hour for 720.
+  price extremes carry over, so a snapshot doubles as a candle. History is
+  retained at five resolutions per pool; the RAM mirror keeps only the open
+  bucket of each tier, because history reads go to SQLite. The disk windows are
+  12 h of 1m, 7 d of 5m, 30 d of 1h, 180 d of 6h, and every 1d bucket forever.
 - Each change is classified from the state deltas as a swap, add, remove,
   or collect. For a swap the derivation is exact: the full input is
   `delta_reserve_in + delta_pot_in`, the protocol fee is `delta_pot_in`, and
