@@ -14,7 +14,7 @@ use miden_protocol::account::{AccountId, AccountStorageHeader, StorageSlotName};
 use miden_protocol::asset::TokenSymbol;
 
 /// Storage slot name prefix shared by every XYK pool slot.
-pub const SLOT_PREFIX: &str = "miden_xyk::miden_xyk";
+pub const SLOT_PREFIX: &str = "port0::port0";
 
 fn slot_name(field: &str) -> Result<StorageSlotName> {
     StorageSlotName::new(format!("{SLOT_PREFIX}::{field}"))

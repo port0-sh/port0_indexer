@@ -1,4 +1,4 @@
-//! MidenXYK indexer library.
+//! port0.sh indexer library.
 //!
 //! The chain reader, decoder, activity classifier, and SQLite store, shared by
 //! the two binaries in this package: the indexer, which polls the chain and owns

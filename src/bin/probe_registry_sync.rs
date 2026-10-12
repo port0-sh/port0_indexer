@@ -7,7 +7,7 @@
 //!
 //! Run with: `cargo run --bin probe_registry_sync [-- <registry id hex>]`
 //! The registry id is read from the first argument, then from
-//! `MIDEN_XYC_REGISTRY_ID` (a `.env` file in this directory is loaded).
+//! `PORT0_REGISTRY_ID` (a `.env` file in this directory is loaded).
 
 use std::time::Duration;
 
@@ -31,24 +31,24 @@ async fn main() -> Result<()> {
         .first()
         .filter(|value| !value.trim().is_empty())
         .cloned()
-        .or_else(|| std::env::var("MIDEN_XYC_REGISTRY_ID").ok())
-        .context("registry id: pass one as an argument or set MIDEN_XYC_REGISTRY_ID")?;
+        .or_else(|| std::env::var("PORT0_REGISTRY_ID").ok())
+        .context("registry id: pass one as an argument or set PORT0_REGISTRY_ID")?;
     let registry = AccountId::from_hex(&registry_hex).context("invalid registry account id")?;
     let rpc_url =
         std::env::var("MIDEN_RPC_URL").unwrap_or_else(|_| "https://rpc.testnet.miden.io".into());
 
-    let mut client = miden_xyk_indexer::rpc::connect(&rpc_url, Duration::from_secs(30)).await?;
+    let mut client = port0_indexer::rpc::connect(&rpc_url, Duration::from_secs(30)).await?;
     let window: u32 = args
         .get(1)
         .map(|value| value.parse().context("window is a block count"))
         .transpose()?
         .unwrap_or(DEFAULT_WINDOW);
 
-    let tip = miden_xyk_indexer::rpc::chain_tip(&mut client).await?;
+    let tip = port0_indexer::rpc::chain_tip(&mut client).await?;
     let from = tip.saturating_sub(window);
 
     let (updates, covered) =
-        miden_xyk_indexer::rpc::sync_account_storage_maps(&mut client, registry, from).await?;
+        port0_indexer::rpc::sync_account_storage_maps(&mut client, registry, from).await?;
 
     println!("registry {registry_hex}");
     println!(
@@ -59,8 +59,8 @@ async fn main() -> Result<()> {
         println!("  block {} slot {}", update.block_num, update.slot_name);
     }
 
-    let pools = miden_xyk_indexer::registry::decode_pool_updates(&updates)?;
-    let pairs = miden_xyk_indexer::registry::decode_asset_pair_updates(&updates)?;
+    let pools = port0_indexer::registry::decode_pool_updates(&updates)?;
+    let pairs = port0_indexer::registry::decode_asset_pair_updates(&updates)?;
     println!(
         "decoded: {} pool updates, {} pair updates",
         pools.len(),

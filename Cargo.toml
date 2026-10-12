@@ -1,5 +1,5 @@
 [package]
-name = "miden_xyk_indexer"
+name = "port0_indexer"
 version = "0.1.0"
 edition = "2024"
 
