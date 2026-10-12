@@ -196,27 +196,28 @@ impl Store {
              ORDER BY start_unix DESC
              LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![pool_id, seconds(resolution), limit as i64], |row| {
-            Ok(Snapshot {
-                block: row.get(0)?,
-                timestamp: read_u64(row, 1)?,
-                polled_at: read_u64(row, 2)?,
-                reserve0: parse_u64(&row.get::<_, String>(3)?, "reserve0")?,
-                reserve1: parse_u64(&row.get::<_, String>(4)?, "reserve1")?,
-                open_reserve0: parse_u64(&row.get::<_, String>(5)?, "open_reserve0")?,
-                open_reserve1: parse_u64(&row.get::<_, String>(6)?, "open_reserve1")?,
-                high_reserve0: parse_u64(&row.get::<_, String>(7)?, "high_reserve0")?,
-                high_reserve1: parse_u64(&row.get::<_, String>(8)?, "high_reserve1")?,
-                low_reserve0: parse_u64(&row.get::<_, String>(9)?, "low_reserve0")?,
-                low_reserve1: parse_u64(&row.get::<_, String>(10)?, "low_reserve1")?,
-                lp_supply: parse_u64(&row.get::<_, String>(11)?, "lp_supply")?,
-                k: parse_u128(&row.get::<_, String>(12)?, "k")?,
-                pot0: parse_u64(&row.get::<_, String>(13)?, "pot0")?,
-                pot1: parse_u64(&row.get::<_, String>(14)?, "pot1")?,
-                price0_cumulative: parse_u128(&row.get::<_, String>(15)?, "price0_cum")?,
-                price1_cumulative: parse_u128(&row.get::<_, String>(16)?, "price1_cum")?,
-            })
-        })?;
+        let rows =
+            statement.query_map(params![pool_id, seconds(resolution), limit as i64], |row| {
+                Ok(Snapshot {
+                    block: row.get(0)?,
+                    timestamp: read_u64(row, 1)?,
+                    polled_at: read_u64(row, 2)?,
+                    reserve0: parse_u64(&row.get::<_, String>(3)?, "reserve0")?,
+                    reserve1: parse_u64(&row.get::<_, String>(4)?, "reserve1")?,
+                    open_reserve0: parse_u64(&row.get::<_, String>(5)?, "open_reserve0")?,
+                    open_reserve1: parse_u64(&row.get::<_, String>(6)?, "open_reserve1")?,
+                    high_reserve0: parse_u64(&row.get::<_, String>(7)?, "high_reserve0")?,
+                    high_reserve1: parse_u64(&row.get::<_, String>(8)?, "high_reserve1")?,
+                    low_reserve0: parse_u64(&row.get::<_, String>(9)?, "low_reserve0")?,
+                    low_reserve1: parse_u64(&row.get::<_, String>(10)?, "low_reserve1")?,
+                    lp_supply: parse_u64(&row.get::<_, String>(11)?, "lp_supply")?,
+                    k: parse_u128(&row.get::<_, String>(12)?, "k")?,
+                    pot0: parse_u64(&row.get::<_, String>(13)?, "pot0")?,
+                    pot1: parse_u64(&row.get::<_, String>(14)?, "pot1")?,
+                    price0_cumulative: parse_u128(&row.get::<_, String>(15)?, "price0_cum")?,
+                    price1_cumulative: parse_u128(&row.get::<_, String>(16)?, "price1_cum")?,
+                })
+            })?;
         let mut points: Vec<Snapshot> = rows.collect::<rusqlite::Result<_>>()?;
         points.reverse();
         Ok(points)

@@ -39,12 +39,7 @@ pub const RETENTION: [(u64, Option<u64>); 5] = [
 /// just traded is polled every 15 s, one idle for an hour every minute, one idle
 /// for a day every 10 minutes, and anything older hourly. The point is to stop
 /// paying an RPC call per pool per tick once a pool stops moving.
-const POLL_TIERS: [(u64, u64); 4] = [
-    (300, 15),
-    (3_600, 60),
-    (86_400, 600),
-    (u64::MAX, 3_600),
-];
+const POLL_TIERS: [(u64, u64); 4] = [(300, 15), (3_600, 60), (86_400, 600), (u64::MAX, 3_600)];
 
 /// How often a pool idle for `idle` seconds is polled.
 fn cadence_for(idle: u64) -> u64 {

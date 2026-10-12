@@ -18,7 +18,8 @@ precedence, and a missing file is not an error.
 | --- | --- | --- |
 | `MIDEN_RPC_URL` | `https://rpc.testnet.miden.io` | Node RPC endpoint |
 | `MIDEN_XYC_REGISTRY_ID` | required | Registry account id, hex |
-| `INDEXER_LISTEN` | `0.0.0.0:8080` | HTTP listen address |
+| `INDEXER_LISTEN` | `127.0.0.1:8080` | HTTP listen address. Loopback by default, for an API behind a reverse proxy |
+| `INDEXER_ALLOWED_ORIGINS` | (empty) | Comma-separated origins allowed to read the API cross-origin. Empty means same-origin only; no wildcard is accepted |
 | `POOL_POLL_SECS` | `15` | Scheduler tick in seconds, clamped to `1..=5`; per-pool cadence is internal |
 | `REGISTRY_POLL_SECS` | `60` | Registry poll interval |
 | `INDEXER_DB` | `miden_xyk_indexer.sqlite` | SQLite path; empty or `off` keeps the index in RAM only |
@@ -34,6 +35,12 @@ precedence, and a missing file is not an error.
 | `GET /pools/{id}` | pool summary with its fee schedule, plus the newest history points |
 | `GET /pools/{id}/history` | the pool's history; `?resolution=1m\|5m\|1h\|6h\|1d`, default `1m` |
 | `POST /pools/{id}/refresh` | marks the pool due for the next tick; `202`, or `429` with `Retry-After` when limited |
+
+Cross-origin reads are closed by default. `INDEXER_ALLOWED_ORIGINS` lists the
+origins the API answers, and only `GET` and `POST` are allowed, without
+credentials. The refresh route is state-changing, so no wildcard is accepted; an
+empty list means same-origin only, which is what a deployment behind a reverse
+proxy wants. A malformed entry is logged and dropped.
 
 The list is keyset paginated by pool id: pass the `next_cursor` of one page back
 as `cursor`. The list omits each pool's fee schedule, which is the largest part of
@@ -134,7 +141,7 @@ What breaks first, in order:
 
 | Wall | Detail |
 | --- | --- |
-| Registry read | The node does not return a storage map above 1,000 entries inline. The `pools` map is one map, so the pool set stops being readable at 1,001 pools, long before 10,000. Needs `SyncAccountStorageMaps` paging or a sharded registry. |
+| Registry read | The node does not return a storage map above 1,000 entries inline, so the inline read of the `pools` map stops at 1,001 pools. The indexer detects that cap and discovers pools through the paginated `SyncAccountStorageMaps` endpoint instead, which has no entry limit: a block range per poll, walked up to 64 pages, resuming from the block it reached. |
 | RPC rate | Polling 10,000 pools per 15 s is 667 `get_account` calls per second, each also carrying the pool's storage maps and vault. Not serviceable by a public node. Needs event- or block-driven fetching instead of a full sweep. |
 | Indexer RAM | The in-memory model keeps one open bucket per tier (5 snapshots) and up to 4,096 activities per pool with no global cap. At 10,000 pools the activity ring dominates at about 3.3 GB; the snapshots are negligible. The process breaks before the disk does. |
 | API payload | `GET /pools` returns one page (default 50, maximum 500 entries, order 1 KB each). A client that walks every cursor re-reads 10 MB per sweep. |
@@ -200,6 +207,10 @@ that trips either gets `429` with `Retry-After`.
 cargo build --release
 MIDEN_XYC_REGISTRY_ID=<registry id> ./target/release/miden_xyk_indexer
 ```
+
+`cargo run --bin probe_registry_sync -- "" <blocks>` reads the registry's
+storage-map updates for the last `<blocks>` blocks and prints what it decoded. It
+reads only, and it is how the sync endpoint was checked against a live node.
 
 ## Roadmap
 

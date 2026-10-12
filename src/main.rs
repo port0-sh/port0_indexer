@@ -4,7 +4,6 @@
 //! Polls the registry for pool ids and each pool for state, keeps a bounded
 //! in-memory history, and serves the result over HTTP.
 
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,6 +25,8 @@ struct Config {
     db: String,
     /// Keep snapshots forever instead of pruning them to the RAM window.
     keep_all_snapshots: bool,
+    /// Origins the API answers cross-origin, from `INDEXER_ALLOWED_ORIGINS`.
+    allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -36,13 +37,16 @@ impl Config {
             std::env::var("MIDEN_XYC_REGISTRY_ID").context("MIDEN_XYC_REGISTRY_ID is required")?;
         let registry_id =
             AccountId::from_hex(&registry_hex).context("invalid MIDEN_XYC_REGISTRY_ID")?;
-        let listen = std::env::var("INDEXER_LISTEN").unwrap_or_else(|_| "0.0.0.0:8080".into());
+        // Loopback by default: the API is reached through a reverse proxy, and a
+        // host that forgets to set this should not expose it on every interface.
+        let listen = std::env::var("INDEXER_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".into());
         let pool_poll = Duration::from_secs(env_secs("POOL_POLL_SECS", 15));
         let registry_poll = Duration::from_secs(env_secs("REGISTRY_POLL_SECS", 60));
         let db = std::env::var("INDEXER_DB").unwrap_or_else(|_| "miden_xyk_indexer.sqlite".into());
         let keep_all_snapshots = std::env::var("INDEXER_SNAPSHOT_RETENTION")
             .map(|value| value.eq_ignore_ascii_case("all"))
             .unwrap_or(false);
+        let allowed_origins = env_list("INDEXER_ALLOWED_ORIGINS");
         Ok(Self {
             rpc_url,
             registry_id,
@@ -51,8 +55,23 @@ impl Config {
             registry_poll,
             db,
             keep_all_snapshots,
+            allowed_origins,
         })
     }
+}
+
+/// Reads a comma-separated list, dropping empty entries.
+fn env_list(name: &str) -> Vec<String> {
+    std::env::var(name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn env_secs(name: &str, default: u64) -> u64 {
@@ -112,7 +131,8 @@ async fn main() -> Result<()> {
                 capped
             }
         };
-        let opened = miden_xyk_indexer::store::Store::open(&config.db, retention, ACTIVITY_RETENTION_SECS)?;
+        let opened =
+            miden_xyk_indexer::store::Store::open(&config.db, retention, ACTIVITY_RETENTION_SECS)?;
         let loaded = opened.load()?;
         let pools = loaded.pools.len();
         let snapshots: usize = loaded
@@ -158,8 +178,10 @@ async fn main() -> Result<()> {
         limiter: Arc::new(std::sync::Mutex::new(miden_xyk_indexer::api::Limiter::new())),
     };
     let listen = config.listen.clone();
+    let allowed_origins = config.allowed_origins.clone();
     tokio::spawn(async move {
-        if let Err(err) = miden_xyk_indexer::api::serve(api_state, &listen).await {
+        if let Err(err) = miden_xyk_indexer::api::serve(api_state, &listen, &allowed_origins).await
+        {
             tracing::error!(%err, "HTTP API exited");
         }
     });
@@ -253,7 +275,10 @@ async fn follow_blocks(client: &mut RpcClient, state: Arc<RwLock<IndexState>>) {
 }
 
 /// Marks every known pool whose account the block changed as due for a poll.
-async fn mark_touched(block: &miden_objects::proto::blockchain::SignedBlock, state: &Arc<RwLock<IndexState>>) {
+async fn mark_touched(
+    block: &miden_objects::proto::blockchain::SignedBlock,
+    state: &Arc<RwLock<IndexState>>,
+) {
     let Some(body) = block.body.as_ref() else {
         return;
     };
@@ -280,14 +305,11 @@ async fn mark_touched(block: &miden_objects::proto::blockchain::SignedBlock, sta
 
 /// `(prefix, suffix)` of a proto account id, which is how a decoded account id
 /// compares against one: the two share these felts, whatever their hex form.
-fn account_id_felts(
-    id: &miden_objects::proto::account::AccountId,
-) -> Option<(u64, u64)> {
+fn account_id_felts(id: &miden_objects::proto::account::AccountId) -> Option<(u64, u64)> {
     match id.version.as_ref()? {
-        miden_objects::proto::account::account_id::Version::V1(v1) => Some((
-            v1.prefix.as_ref()?.value,
-            v1.suffix.as_ref()?.value,
-        )),
+        miden_objects::proto::account::account_id::Version::V1(v1) => {
+            Some((v1.prefix.as_ref()?.value, v1.suffix.as_ref()?.value))
+        }
     }
 }
 
@@ -301,14 +323,88 @@ async fn poll_registry(
     registry_id: AccountId,
     state: &Arc<RwLock<IndexState>>,
 ) -> Result<usize> {
+    match read_registry(client, registry_id, state).await {
+        Ok(discovered) => Ok(discovered),
+        Err(err) => {
+            let over = err
+                .downcast_ref::<miden_xyk_indexer::registry::OverCapacity>()
+                .map(|over| over.slot);
+            match over {
+                Some(slot) => {
+                    tracing::info!(
+                        slot,
+                        "registry map is over the inline read cap; syncing by block range"
+                    );
+                    sync_registry(client, registry_id, state).await
+                }
+                None => Err(err),
+            }
+        }
+    }
+}
+
+/// One account read of the registry, for a registry inside the node's inline cap.
+async fn read_registry(
+    client: &mut RpcClient,
+    registry_id: AccountId,
+    state: &Arc<RwLock<IndexState>>,
+) -> Result<usize> {
     let account = miden_xyk_indexer::rpc::fetch_account_with_maps(client, registry_id).await?;
     let details = account.details.context("registry account has no details")?;
 
-    let entries = miden_xyk_indexer::registry::decode_registry(&details.storage_details.map_details)?;
-    let pairs = miden_xyk_indexer::registry::decode_asset_pairs(&details.storage_details.map_details)?;
+    let entries =
+        miden_xyk_indexer::registry::decode_registry(&details.storage_details.map_details)?;
+    let pairs =
+        miden_xyk_indexer::registry::decode_asset_pairs(&details.storage_details.map_details)?;
 
     let mut guard = state.write().await;
     guard.last_registry_block = Some(account.block_num.as_u32());
+    Ok(apply_registry(&mut guard, entries, pairs))
+}
+
+/// Discovers pools from the registry's map updates, which carry no entry cap.
+///
+/// The range starts at the latest block a registry read covered, or at the
+/// earliest block a known pool was seen in, which the store holds. A restart
+/// therefore resumes without a second cursor, and discovery is idempotent, so an
+/// overlapping range costs one read and nothing else.
+async fn sync_registry(
+    client: &mut RpcClient,
+    registry_id: AccountId,
+    state: &Arc<RwLock<IndexState>>,
+) -> Result<usize> {
+    let from = {
+        let guard = state.read().await;
+        guard
+            .last_registry_block
+            .or_else(|| guard.pools.values().map(|record| record.block).min())
+            .unwrap_or_default()
+    };
+
+    let (updates, covered) =
+        miden_xyk_indexer::rpc::sync_account_storage_maps(client, registry_id, from).await?;
+    let entries = miden_xyk_indexer::registry::decode_pool_updates(&updates)?;
+    let pairs = miden_xyk_indexer::registry::decode_asset_pair_updates(&updates)?;
+
+    let mut guard = state.write().await;
+    guard.last_registry_block = Some(covered);
+    let discovered = apply_registry(&mut guard, entries, pairs);
+    tracing::info!(
+        from,
+        covered,
+        updates = updates.len(),
+        discovered,
+        "registry synced"
+    );
+    Ok(discovered)
+}
+
+/// Applies a registry read or a registry sync to the state.
+fn apply_registry(
+    guard: &mut IndexState,
+    entries: Vec<miden_xyk_indexer::registry::RegistryEntry>,
+    pairs: Vec<((AccountId, AccountId), AccountId)>,
+) -> usize {
     let mut discovered = 0;
     for entry in entries {
         if guard.discover(entry) {
@@ -318,7 +414,7 @@ async fn poll_registry(
     for ((asset0, asset1), pool_id) in pairs {
         guard.set_pair(asset0, asset1, pool_id);
     }
-    Ok(discovered)
+    discovered
 }
 
 /// Fetches every known pool that is due, applying its state.
@@ -345,7 +441,11 @@ async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> 
     if ids.is_empty() {
         return Ok(0);
     }
-    tracing::debug!(due = ids.len(), pools = state.read().await.pools.len(), "polling due pools");
+    tracing::debug!(
+        due = ids.len(),
+        pools = state.read().await.pools.len(),
+        "polling due pools"
+    );
 
     let mut updated = 0;
     for id in ids {
@@ -373,13 +473,10 @@ async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> 
             }
             // After the apply, so a change resets the cadence rather than
             // rescheduling from the idle time the change just invalidated.
-            guard
-                .pools
-                .get_mut(&id.to_hex())
-                .map(|record| {
-                    record.reschedule(miden_xyk_indexer::state::unix_now());
-                    [record.state.token0_faucet, record.state.token1_faucet]
-                })
+            guard.pools.get_mut(&id.to_hex()).map(|record| {
+                record.reschedule(miden_xyk_indexer::state::unix_now());
+                [record.state.token0_faucet, record.state.token1_faucet]
+            })
         };
 
         for faucet in faucets.into_iter().flatten() {
@@ -391,7 +488,9 @@ async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> 
                     let Some(faucet_details) = faucet_account.details else {
                         continue;
                     };
-                    match miden_xyk_indexer::decode::decode_token_meta(&faucet_details.storage_details.header) {
+                    match miden_xyk_indexer::decode::decode_token_meta(
+                        &faucet_details.storage_details.header,
+                    ) {
                         Ok(meta) => {
                             state.write().await.tokens.insert(faucet.to_hex(), meta);
                         }

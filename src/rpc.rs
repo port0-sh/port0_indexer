@@ -10,7 +10,8 @@ use miden_node_proto::DecodeMessageExt;
 use miden_node_proto::clients::{Builder, RpcClient};
 use miden_node_proto::domain::account::GetAccountResponse as VerifiedAccount;
 use miden_node_proto::generated::miden::node::v1::{
-    GetAccountRequest, GetAccountResponse, get_account_request,
+    BlockRange, GetAccountRequest, GetAccountResponse, StorageMapUpdate,
+    SyncAccountStorageMapsRequest, get_account_request,
 };
 use miden_protocol::EMPTY_WORD;
 use miden_protocol::account::AccountId;
@@ -102,4 +103,62 @@ pub async fn fetch_account_with_maps(
 
     raw.decode_and_verify()
         .context("decode get_account response")
+}
+
+/// Pages one call of the streamed sync endpoint before returning what it has.
+///
+/// The caller keeps the block it reached, so a backlog is worked through across
+/// poll cycles rather than in one unbounded loop.
+const SYNC_PAGE_LIMIT: usize = 64;
+
+/// Reads an account's storage-map updates from `block_from` to the chain tip.
+///
+/// `AllStorageMaps` reports `LimitExceeded` once a map holds more than a thousand
+/// entries. This endpoint is the node's answer to that: it pages by block range
+/// and has no entry limit, so the registry's pool set can grow past the inline
+/// cap. Returns the updates and the last block covered, which is the cursor the
+/// caller resumes from.
+pub async fn sync_account_storage_maps(
+    client: &mut RpcClient,
+    account_id: AccountId,
+    block_from: u32,
+) -> Result<(Vec<StorageMapUpdate>, u32)> {
+    let tip = chain_tip(client).await?;
+    if block_from > tip {
+        return Ok((Vec::new(), block_from));
+    }
+
+    let mut updates = Vec::new();
+    let mut from = block_from;
+    let mut covered = block_from;
+    for _ in 0..SYNC_PAGE_LIMIT {
+        let request = SyncAccountStorageMapsRequest {
+            block_range: Some(BlockRange {
+                block_from: from,
+                block_to: tip,
+            }),
+            account_id: Some((&account_id).into()),
+        };
+
+        let response = client
+            .sync_account_storage_maps(request)
+            .await
+            .context("sync_account_storage_maps RPC")?
+            .into_inner();
+
+        let page = response.pagination_info.unwrap_or_default();
+        if page.block_num < from {
+            // The node reported no progress, so the next request would repeat
+            // this range. Stop and let the caller resume from `covered`.
+            break;
+        }
+        covered = page.block_num;
+        updates.extend(response.updates);
+        if page.block_num >= tip {
+            break;
+        }
+        from = page.block_num.saturating_add(1);
+    }
+
+    Ok((updates, covered))
 }

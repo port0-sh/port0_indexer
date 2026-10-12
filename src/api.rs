@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::activity::AGGREGATE_WINDOW_SECS;
 use crate::decode::TokenMeta;
@@ -33,12 +34,22 @@ pub struct ApiState {
 
 /// Limits on the manual refresh endpoint.
 ///
-/// One refresh per pool every [`PER_POOL_COOLDOWN_SECS`], and a global token
-/// bucket refilled at [`REFRESH_PER_SEC`]. A caller that trips either gets 429
+/// A global token bucket refilled at [`REFRESH_PER_SEC`] bounds every request
+/// that reaches the limiter, and one refresh per pool every
+/// [`PER_POOL_COOLDOWN_SECS`] bounds repeats. A caller that trips either gets 429
 /// with `Retry-After`, because the pool's own cadence will fetch it soon anyway.
 const PER_POOL_COOLDOWN_SECS: u64 = 5;
-const REFRESH_PER_SEC: f64 = 20.0;
+const REFRESH_PER_SEC: u64 = 20;
 const REFRESH_BURST: f64 = 20.0;
+
+/// The most keys the cooldown map can hold.
+///
+/// A caller adds at most [`REFRESH_PER_SEC`] keys a second, and only a key
+/// recorded within [`PER_POOL_COOLDOWN_SECS`] can deny anything, so the live set
+/// is one key per pool per cooldown window. The map is trimmed to that bound
+/// rather than trusted to stay under it.
+const PER_POOL_TRACKED_MAX: usize =
+    (REFRESH_PER_SEC as usize) * (PER_POOL_COOLDOWN_SECS as usize + 1);
 
 pub struct Limiter {
     per_pool: HashMap<String, u64>,
@@ -61,24 +72,58 @@ impl Limiter {
         Self::default()
     }
 
-    /// Records a refresh if both limits allow it.
-    pub fn allow(&mut self, pool_id: &str) -> bool {
-        let now = unix_now();
+    /// Takes one token from the global bucket.
+    pub fn take_token(&mut self) -> bool {
+        self.take_token_at(unix_now())
+    }
+
+    fn take_token_at(&mut self, now: u64) -> bool {
         let elapsed = now.saturating_sub(self.last_refill) as f64;
-        self.tokens = (self.tokens + elapsed * REFRESH_PER_SEC).min(REFRESH_BURST);
+        self.tokens = (self.tokens + elapsed * REFRESH_PER_SEC as f64).min(REFRESH_BURST);
         self.last_refill = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+
+    /// Records a refresh of `pool_id` if its cooldown has elapsed.
+    ///
+    /// Callers check that the pool exists first, so the map holds only ids that
+    /// a pool record backs.
+    pub fn allow_pool(&mut self, pool_id: &str) -> bool {
+        self.allow_pool_at(pool_id, unix_now())
+    }
+
+    fn allow_pool_at(&mut self, pool_id: &str, now: u64) -> bool {
+        if self.per_pool.len() >= PER_POOL_TRACKED_MAX {
+            self.per_pool
+                .retain(|_, at| now.saturating_sub(*at) < PER_POOL_COOLDOWN_SECS);
+            if self.per_pool.len() >= PER_POOL_TRACKED_MAX {
+                // Every entry is inside its cooldown, which happens only when the
+                // clock does not advance. Dropping them re-admits at most one
+                // refresh per pool, which is what the cooldown allows anyway.
+                self.per_pool.clear();
+            }
+        }
 
         let cooled = self
             .per_pool
             .get(pool_id)
             .map(|at| now.saturating_sub(*at) >= PER_POOL_COOLDOWN_SECS)
             .unwrap_or(true);
-        if !cooled || self.tokens < 1.0 {
+        if !cooled {
             return false;
         }
-        self.tokens -= 1.0;
         self.per_pool.insert(pool_id.to_string(), now);
         true
+    }
+
+    /// Entries the cooldown map holds. Exposed for the bound test.
+    #[cfg(test)]
+    fn tracked_pools(&self) -> usize {
+        self.per_pool.len()
     }
 }
 
@@ -398,11 +443,21 @@ pub struct HistoryQuery {
 /// the endpoint only moves the pool's schedule forward.
 async fn refresh_pool(State(api): State<ApiState>, Path(id): Path<String>) -> Response {
     let pool_id = normalize(&id);
+
+    // The pool is checked before the limiter, so an unknown id neither takes a
+    // token nor records a key: the cooldown map stays as large as the registry,
+    // not as large as the id space a caller can invent.
+    if !api.state.read().await.pools.contains_key(&pool_id) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     let allowed = {
         let Ok(mut limiter) = api.limiter.lock() else {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
-        limiter.allow(&pool_id)
+        // `allow_pool` is not reached when the bucket is empty, so a throttled
+        // request records nothing either.
+        limiter.take_token() && limiter.allow_pool(&pool_id)
     };
     if !allowed {
         return (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "1")]).into_response();
@@ -479,23 +534,100 @@ async fn get_status(State(api): State<ApiState>) -> Json<Status> {
     })
 }
 
-/// Builds the API router. Permissive CORS: the API is read-only and is fetched
-/// cross-origin from the static app in development.
-pub fn router(api: ApiState) -> Router {
+/// Builds the API router.
+///
+/// CORS is a closed list. The endpoints answer cross-origin only for the origins
+/// in `allowed_origins`, and only for GET and POST without credentials. The
+/// refresh route moves a pool's poll schedule forward, so a wildcard would let
+/// any page a reader visits drive it. An empty list means no cross-origin reads
+/// at all, which is the safe default for a service behind a proxy.
+pub fn router(api: ApiState, allowed_origins: &[String]) -> Router {
+    let origins: Vec<HeaderValue> = allowed_origins
+        .iter()
+        .filter_map(|origin| match origin.parse::<HeaderValue>() {
+            Ok(value) => Some(value),
+            Err(err) => {
+                tracing::warn!(origin = %origin, %err, "ignoring malformed CORS origin");
+                None
+            }
+        })
+        .collect();
+
+    let cors = if origins.is_empty() {
+        tracing::info!("no CORS origins configured; the API is same-origin only");
+        CorsLayer::new()
+    } else {
+        tracing::info!(count = origins.len(), "CORS origins allowed");
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::list(origins))
+            .allow_methods([Method::GET, Method::POST])
+            .allow_headers([CONTENT_TYPE])
+    };
+
     Router::new()
         .route("/status", get(get_status))
         .route("/pools", get(list_pools))
         .route("/pools/{id}", get(get_pool))
         .route("/pools/{id}/history", get(get_history))
         .route("/pools/{id}/refresh", post(refresh_pool))
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(cors)
         .with_state(api)
 }
 
 /// Serves the API until the process ends.
-pub async fn serve(api: ApiState, listen: &str) -> anyhow::Result<()> {
+pub async fn serve(api: ApiState, listen: &str, allowed_origins: &[String]) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen).await?;
     tracing::info!(listen = %listen, "HTTP API listening");
-    axum::serve(listener, router(api)).await?;
+    axum::serve(listener, router(api, allowed_origins)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cooldown_denies_a_second_refresh() {
+        let mut limiter = Limiter::new();
+        assert!(limiter.allow_pool_at("pool-a", 1_000));
+        assert!(!limiter.allow_pool_at("pool-a", 1_000));
+        assert!(limiter.allow_pool_at("pool-a", 1_005));
+    }
+
+    #[test]
+    fn token_bucket_bounds_a_burst() {
+        let mut limiter = Limiter::new();
+        let taken = (0..1000).filter(|_| limiter.take_token_at(1_000)).count();
+        assert_eq!(taken, REFRESH_BURST as usize);
+        assert!(limiter.take_token_at(1_001));
+    }
+
+    /// Twenty keys a second across a five second cooldown is a hundred live
+    /// entries, whatever the caller sends.
+    #[test]
+    fn cooldown_map_is_bounded_by_the_rate_and_the_cooldown() {
+        let mut limiter = Limiter::new();
+        let mut peak = 0;
+        for second in 0..600_u64 {
+            let now = 1_000 + second;
+            for key in 0..REFRESH_PER_SEC as usize {
+                let _ = limiter.allow_pool_at(&format!("pool-{key}"), now);
+            }
+            peak = peak.max(limiter.tracked_pools());
+        }
+        assert!(
+            peak <= PER_POOL_TRACKED_MAX,
+            "cooldown map peaked at {peak}, bound is {PER_POOL_TRACKED_MAX}"
+        );
+    }
+
+    /// A frozen clock keeps every entry live, so only the guard bounds the map.
+    #[test]
+    fn cooldown_map_is_bounded_when_the_clock_does_not_advance() {
+        let mut limiter = Limiter::new();
+        for key in 0..PER_POOL_TRACKED_MAX * 4 {
+            let _ = limiter.allow_pool_at(&format!("pool-{key}"), 1_000);
+        }
+        assert!(limiter.tracked_pools() <= PER_POOL_TRACKED_MAX);
+    }
 }
