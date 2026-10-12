@@ -46,13 +46,19 @@ pub struct Limiter {
     last_refill: u64,
 }
 
-impl Limiter {
-    pub fn new() -> Self {
+impl Default for Limiter {
+    fn default() -> Self {
         Self {
             per_pool: HashMap::new(),
             tokens: REFRESH_BURST,
             last_refill: unix_now(),
         }
+    }
+}
+
+impl Limiter {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Records a refresh if both limits allow it.

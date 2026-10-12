@@ -4,13 +4,6 @@
 //! Polls the registry for pool ids and each pool for state, keeps a bounded
 //! in-memory history, and serves the result over HTTP.
 
-mod activity;
-mod api;
-mod decode;
-mod registry;
-mod rpc;
-mod state;
-mod store;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +14,7 @@ use miden_node_proto::generated::miden::node::v1::BlockSubscriptionRequest;
 use miden_protocol::account::AccountId;
 use tokio::sync::RwLock;
 
-use crate::state::IndexState;
+use miden_xyk_indexer::state::IndexState;
 
 struct Config {
     rpc_url: String,
@@ -83,7 +76,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let client = rpc::connect(&config.rpc_url, Duration::from_secs(10)).await?;
+    let client = miden_xyk_indexer::rpc::connect(&config.rpc_url, Duration::from_secs(10)).await?;
     tracing::info!(
         rpc = %config.rpc_url,
         registry = %config.registry_id.to_hex(),
@@ -96,7 +89,7 @@ async fn main() -> Result<()> {
     // Start the block stream at the present. Replaying from genesis would walk
     // every block once for no benefit: pools are discovered by the registry,
     // and only blocks after this point can move a known pool.
-    if let Ok(tip) = rpc::chain_tip(&mut client.clone()).await {
+    if let Ok(tip) = miden_xyk_indexer::rpc::chain_tip(&mut client.clone()).await {
         state.last_processed_block = tip;
     }
     let state = Arc::new(RwLock::new(state));
@@ -119,7 +112,7 @@ async fn main() -> Result<()> {
                 capped
             }
         };
-        let opened = store::Store::open(&config.db, retention, ACTIVITY_RETENTION_SECS)?;
+        let opened = miden_xyk_indexer::store::Store::open(&config.db, retention, ACTIVITY_RETENTION_SECS)?;
         let loaded = opened.load()?;
         let pools = loaded.pools.len();
         let snapshots: usize = loaded
@@ -154,19 +147,19 @@ async fn main() -> Result<()> {
     // allows one writer and many readers, so neither side waits on the other.
     let history = match &store {
         Some(_) if !config.db.is_empty() && config.db != "off" => {
-            let reader = store::Store::open_read_only(&config.db)?;
+            let reader = miden_xyk_indexer::store::Store::open_read_only(&config.db)?;
             Some(Arc::new(std::sync::Mutex::new(reader)))
         }
         _ => None,
     };
-    let api_state = api::ApiState {
+    let api_state = miden_xyk_indexer::api::ApiState {
         state: Arc::clone(&state),
         history,
-        limiter: Arc::new(std::sync::Mutex::new(api::Limiter::new())),
+        limiter: Arc::new(std::sync::Mutex::new(miden_xyk_indexer::api::Limiter::new())),
     };
     let listen = config.listen.clone();
     tokio::spawn(async move {
-        if let Err(err) = api::serve(api_state, &listen).await {
+        if let Err(err) = miden_xyk_indexer::api::serve(api_state, &listen).await {
             tracing::error!(%err, "HTTP API exited");
         }
     });
@@ -308,11 +301,11 @@ async fn poll_registry(
     registry_id: AccountId,
     state: &Arc<RwLock<IndexState>>,
 ) -> Result<usize> {
-    let account = rpc::fetch_account_with_maps(client, registry_id).await?;
+    let account = miden_xyk_indexer::rpc::fetch_account_with_maps(client, registry_id).await?;
     let details = account.details.context("registry account has no details")?;
 
-    let entries = registry::decode_registry(&details.storage_details.map_details)?;
-    let pairs = registry::decode_asset_pairs(&details.storage_details.map_details)?;
+    let entries = miden_xyk_indexer::registry::decode_registry(&details.storage_details.map_details)?;
+    let pairs = miden_xyk_indexer::registry::decode_asset_pairs(&details.storage_details.map_details)?;
 
     let mut guard = state.write().await;
     guard.last_registry_block = Some(account.block_num.as_u32());
@@ -333,7 +326,7 @@ async fn poll_registry(
 /// The sweep runs on a short tick, but a pool is only fetched when its own
 /// cadence says so, so an idle pool costs nothing between polls.
 async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> Result<usize> {
-    let now = crate::state::unix_now();
+    let now = miden_xyk_indexer::state::unix_now();
     let ids: Vec<AccountId> = {
         let guard = state.read().await;
         guard
@@ -356,7 +349,7 @@ async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> 
 
     let mut updated = 0;
     for id in ids {
-        let account = match rpc::fetch_account_with_maps(client, id).await {
+        let account = match miden_xyk_indexer::rpc::fetch_account_with_maps(client, id).await {
             Ok(account) => account,
             Err(err) => {
                 tracing::warn!(pool = %id.to_hex(), %err, "pool fetch failed");
@@ -384,7 +377,7 @@ async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> 
                 .pools
                 .get_mut(&id.to_hex())
                 .map(|record| {
-                    record.reschedule(crate::state::unix_now());
+                    record.reschedule(miden_xyk_indexer::state::unix_now());
                     [record.state.token0_faucet, record.state.token1_faucet]
                 })
         };
@@ -393,12 +386,12 @@ async fn poll_pools(client: &mut RpcClient, state: &Arc<RwLock<IndexState>>) -> 
             if state.read().await.tokens.contains_key(&faucet.to_hex()) {
                 continue;
             }
-            match rpc::fetch_account(client, faucet).await {
+            match miden_xyk_indexer::rpc::fetch_account(client, faucet).await {
                 Ok(faucet_account) => {
                     let Some(faucet_details) = faucet_account.details else {
                         continue;
                     };
-                    match decode::decode_token_meta(&faucet_details.storage_details.header) {
+                    match miden_xyk_indexer::decode::decode_token_meta(&faucet_details.storage_details.header) {
                         Ok(meta) => {
                             state.write().await.tokens.insert(faucet.to_hex(), meta);
                         }
