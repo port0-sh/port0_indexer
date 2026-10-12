@@ -5,8 +5,8 @@ no Miden client, no keystore. Polls the on-chain registry for pool ids and each
 pool for state, keeps a bounded history in SQLite, and serves the result over
 HTTP.
 
-For the full stack bring-up and the pool deployment flow, see
-`../miden_xyk_app/RUNBOOK.md`.
+For the full stack bring-up and the pool deployment flow, see the `RUNBOOK.md`
+in the `miden_xyk_app` repository.
 
 ## Configuration
 
@@ -86,8 +86,8 @@ open bucket of each tier, which is all a poll needs to extend it, so memory is
 
 Every amount is a TEXT column. SQLite's INTEGER is a signed 64-bit value, so a
 `u64` above `2^63 - 1` cannot be stored in it and a `u128` never can; both appear
-in pool state. `rusqlite` has no `u64` binding at all, which is how this was
-found. Amounts travel as the decimal strings the API already uses, and block
+in pool state. `rusqlite` has no `u64` binding at all. Amounts travel as the
+decimal strings the API already uses, and block
 numbers, timestamps, and resolution periods take an `i64` that cannot overflow.
 
 The file grows by the measured cost of a row: **360.3 bytes per snapshot** and
