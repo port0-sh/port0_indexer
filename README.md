@@ -5,8 +5,8 @@ no Miden client, no keystore. Polls the on-chain registry for pool ids and each
 pool for state, keeps a bounded history in SQLite, and serves the result over
 HTTP.
 
-For the full stack bring-up and the pool deployment flow, see the `RUNBOOK.md`
-in the `port0_app` repository.
+For the full stack bring-up and the pool deployment flow, see the
+[runbook](https://docs.port0.sh/operations/runbook.html).
 
 ## Configuration
 
@@ -79,8 +79,8 @@ Each summary also resolves display and configuration data from the chain:
 Token symbols are decoded with the protocol's `TokenSymbol` type. The app maps
 the schedule roots to note kinds through the SDK's compiled note scripts.
 
-The API is read-only and sends permissive CORS headers, so the static app can
-fetch it cross-origin in development.
+The API answers cross-origin only for the origins in `INDEXER_ALLOWED_ORIGINS`,
+so a static app served from another origin must be listed there.
 
 ## Storage
 
@@ -195,9 +195,9 @@ that trips either gets `429` with `Retry-After`.
   that is indistinguishable from a genuinely empty vault. An indexer that omits
   the field reports every pool as holding zero reserves. A vault the node
   refuses to enumerate is an error, not a zero balance.
-- The registry's `pools` map is the pool set. A map above 1000 entries is not
-  returned inline by the node; the registry decoder reports the limit instead of
-  returning a partial list.
+- The registry's `pools` map is the pool set. The node returns at most 1000
+  entries inline; above that the indexer falls back to `SyncAccountStorageMaps`,
+  which has no entry limit and is walked as a block range.
 - Token metadata is read once per faucet and cached. The fee schedule is read
   from the pool account on every poll. It is fixed at pool creation, so it does not change.
 
@@ -211,6 +211,15 @@ PORT0_REGISTRY_ID=<registry id> ./target/release/port0_indexer
 `cargo run --bin probe_registry_sync -- "" <blocks>` reads the registry's
 storage-map updates for the last `<blocks>` blocks and prints what it decoded. It
 reads only, and it is how the sync endpoint was checked against a live node.
+
+## Source
+
+Radicle is the canonical source. GitHub is the mirror.
+
+| Source | Location |
+| --- | --- |
+| Radicle | https://radicle.network/nodes/iris.radicle.network/rad%3Azf39RzWpXwMZ43w5818EPy5jbg7M |
+| GitHub | https://github.com/port0-sh/port0_indexer |
 
 ## Roadmap
 
