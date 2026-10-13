@@ -314,6 +314,21 @@ impl PoolRecord {
         }
     }
 
+    /// Seeds the activity ring from the store.
+    ///
+    /// Not `push_activity`: that also queues the activity for the next write,
+    /// and the row it came from is already in the table. The ring is stamped
+    /// with the activity's own time, which is what the trailing aggregates
+    /// measure against.
+    fn seed_activities(&mut self, activities: Vec<Activity>) {
+        for activity in activities {
+            if self.activities.len() == MAX_ACTIVITIES {
+                self.activities.pop_front();
+            }
+            self.activities.push_back((activity, activity.timestamp));
+        }
+    }
+
     fn push_activity(&mut self, activity: Activity, polled_at: u64) {
         if self.activities.len() == MAX_ACTIVITIES {
             self.activities.pop_front();
@@ -413,6 +428,7 @@ impl IndexState {
                 // would start the series empty and the chart would lose the past.
                 if let Some(previous) = self.replay.remove(&key) {
                     record.restore(previous.buckets);
+                    record.seed_activities(previous.activities);
                     // Keep the yield window continuous: it is measured from the
                     // pool's first sighting, which outlives this process.
                     record.first_seen_unix = previous.first_seen_unix;

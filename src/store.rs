@@ -119,6 +119,8 @@ pub struct LoadedPool {
     pub last_change_unix: u64,
     /// `(resolution seconds, buckets in ascending start order)`.
     pub buckets: Vec<(u64, Vec<Snapshot>)>,
+    /// Classified changes still inside the retention window, oldest first.
+    pub activities: Vec<Activity>,
 }
 
 pub struct Store {
@@ -256,6 +258,7 @@ impl Store {
                 first_seen_unix: read_u64(row, 3)?,
                 last_change_unix: read_u64(row, 4)?,
                 buckets: Vec::new(),
+                activities: Vec::new(),
             })
         })?;
         for pool in pools {
@@ -293,6 +296,37 @@ impl Store {
                 },
             ))
         })?;
+        // Activities are read so the trailing aggregates survive a restart. The
+        // table is already pruned to the retention window, so everything in it
+        // is worth keeping; oldest first, because the ring drops from the front.
+        let mut statement = self.conn.prepare(
+            "SELECT pool_id, at_unix, block, kind, volume0, volume1,
+                    lp_fee0, lp_fee1, pot_fee0, pot_fee1
+             FROM activities ORDER BY pool_id, at_unix",
+        )?;
+        let activity_rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                Activity {
+                    block: row.get(2)?,
+                    timestamp: read_u64(row, 1)?,
+                    kind: kind_from_name(&row.get::<_, String>(3)?),
+                    volume0: parse_u64(&row.get::<_, String>(4)?, "volume0")?,
+                    volume1: parse_u64(&row.get::<_, String>(5)?, "volume1")?,
+                    lp_fee0: parse_u64(&row.get::<_, String>(6)?, "lp_fee0")?,
+                    lp_fee1: parse_u64(&row.get::<_, String>(7)?, "lp_fee1")?,
+                    protocol_fee0: parse_u64(&row.get::<_, String>(8)?, "pot_fee0")?,
+                    protocol_fee1: parse_u64(&row.get::<_, String>(9)?, "pot_fee1")?,
+                },
+            ))
+        })?;
+        for row in activity_rows {
+            let (pool_id, activity) = row?;
+            if let Some(pool) = loaded.pools.iter_mut().find(|pool| pool.id == pool_id) {
+                pool.activities.push(activity);
+            }
+        }
+
         for row in rows {
             let (pool_id, resolution, snapshot) = row?;
             let Some(pool) = loaded.pools.iter_mut().find(|pool| pool.id == pool_id) else {
@@ -479,6 +513,18 @@ fn kind_name(kind: ActivityKind) -> &'static str {
     }
 }
 
+/// The activity kind a stored name stands for. Unknown names read as `Other`,
+/// which is what a database written by a newer version will contain.
+fn kind_from_name(name: &str) -> ActivityKind {
+    match name {
+        "swap" => ActivityKind::Swap,
+        "add" => ActivityKind::AddLiquidity,
+        "remove" => ActivityKind::RemoveLiquidity,
+        "collect" => ActivityKind::Collect,
+        _ => ActivityKind::Other,
+    }
+}
+
 fn parse_u64(value: &str, field: &str) -> rusqlite::Result<u64> {
     value.parse().map_err(|_| {
         rusqlite::Error::InvalidColumnType(0, field.to_string(), rusqlite::types::Type::Text)
@@ -489,4 +535,58 @@ fn parse_u128(value: &str, field: &str) -> rusqlite::Result<u128> {
     value.parse().map_err(|_| {
         rusqlite::Error::InvalidColumnType(0, field.to_string(), rusqlite::types::Type::Text)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::activity::{Activity, ActivityKind};
+
+    /// A write followed by a load returns the activity.
+    ///
+    /// The trailing aggregates are computed from the in-memory ring, so an
+    /// activity the loader drops is a 24 hour figure that silently reads zero
+    /// after every restart. This pins the read half of that path.
+    #[test]
+    fn activities_round_trip_through_the_store() {
+        let now = crate::state::unix_now();
+        let activity = Activity {
+            block: 7,
+            timestamp: now - 60,
+            kind: ActivityKind::Swap,
+            volume0: 1_000_000,
+            volume1: 500_000,
+            lp_fee0: 3_000,
+            lp_fee1: 1_500,
+            protocol_fee0: 360,
+            protocol_fee1: 180,
+        };
+        let mut store = Store::open(":memory:", crate::state::RETENTION.to_vec(), 7 * 24 * 3_600)
+            .expect("open");
+
+        store
+            .write(&Cycle {
+                tokens: Vec::new(),
+                pools: vec![PoolWrite {
+                    id: "0xpool".to_string(),
+                    token0: "0xa".to_string(),
+                    token1: "0xb".to_string(),
+                    block: 7,
+                    first_seen_unix: now - 600,
+                    last_change_unix: now - 60,
+                    lp_supply: 0,
+                    buckets: Vec::new(),
+                }],
+                activities: vec![("0xpool".to_string(), activity)],
+            })
+            .expect("write");
+
+        let loaded = store.load().expect("load");
+        let pool = loaded
+            .pools
+            .iter()
+            .find(|pool| pool.id == "0xpool")
+            .expect("the pool it wrote");
+        assert_eq!(pool.activities, vec![activity]);
+    }
 }

@@ -135,6 +135,7 @@ async fn main() -> Result<()> {
             port0_indexer::store::Store::open(&config.db, retention, ACTIVITY_RETENTION_SECS)?;
         let loaded = opened.load()?;
         let pools = loaded.pools.len();
+        let activities: usize = loaded.pools.iter().map(|pool| pool.activities.len()).sum();
         let snapshots: usize = loaded
             .pools
             .iter()
@@ -153,6 +154,7 @@ async fn main() -> Result<()> {
             db = %config.db,
             pools,
             snapshots,
+            activities,
             snapshots_kept = if config.keep_all_snapshots {
                 "every bucket, forever"
             } else {
