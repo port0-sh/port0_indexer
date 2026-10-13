@@ -82,6 +82,30 @@ the schedule roots to note kinds through the SDK's compiled note scripts.
 The API answers cross-origin only for the origins in `INDEXER_ALLOWED_ORIGINS`,
 so a static app served from another origin must be listed there.
 
+### Caching
+
+Every response carries an explicit `Cache-Control`. The indexer's view is at most
+one poll old, so a lifetime longer than a poll adds staleness and nothing else,
+and nothing a reader acts on is stored at all.
+
+| Route | `Cache-Control` |
+| --- | --- |
+| `GET /pools`, `GET /pools/{id}` | `public, max-age=5, must-revalidate` |
+| `GET /pools/{id}/history` at `1m` or `5m` | `public, max-age=5, must-revalidate` |
+| `GET /pools/{id}/history` at `1h`, `6h`, or `1d` | `public, max-age=15, must-revalidate` |
+| `GET /status` | `no-store` |
+| `POST /pools/{id}/refresh` | `no-store` |
+| Any non-success, including a 404 | `no-store` |
+
+A 404 is uncacheable on purpose: until the registry surfaces a pool, the indexer
+answers 404, and a stored copy would leave the pool page saying not found after
+the pool exists. The coarser history resolutions get a longer life because a
+bucket closes within its own period.
+
+`Vary` comes from the CORS layer and names the origin and the preflight headers.
+A CDN in front of the API either honours these headers or bypasses its cache for
+the API path, and `Age` is the response field that shows which is happening.
+
 ## Storage
 
 SQLite holds the pool set, token metadata, one row per history bucket, and one

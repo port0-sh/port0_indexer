@@ -3,8 +3,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, Method, StatusCode, header::CONTENT_TYPE};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{
+    HeaderValue, Method, StatusCode,
+    header::{CACHE_CONTROL, CONTENT_TYPE},
+};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -534,6 +538,53 @@ async fn get_status(State(api): State<ApiState>) -> Json<Status> {
     })
 }
 
+/// Cache lifetime for a response, as a `Cache-Control` value.
+///
+/// The indexer's own view is at most one poll old, so a lifetime longer than a
+/// poll adds staleness and nothing else. Nothing a reader acts on is stored:
+/// the refresh route, the operational status route, and every non-success. A
+/// cached 404 for a pool the registry has not surfaced yet would leave a page
+/// saying not found after the pool exists, and a cached 400 would outlive the
+/// bad cursor that caused it.
+pub fn cache_control(method: &Method, path: &str, query: &str, status: StatusCode) -> &'static str {
+    if method == Method::POST || method == Method::OPTIONS || !status.is_success() {
+        return "no-store";
+    }
+    if path == "/status" {
+        return "no-store";
+    }
+    if !path.ends_with("/history") {
+        return "public, max-age=5, must-revalidate";
+    }
+    // A bucket closes within its own period, so the coarse resolutions tolerate a
+    // few seconds of staleness where the one minute series does not.
+    match resolution(query).as_deref() {
+        Some("1h" | "6h" | "1d") => "public, max-age=15, must-revalidate",
+        _ => "public, max-age=5, must-revalidate",
+    }
+}
+
+/// The `resolution` query parameter, if the request carried one.
+fn resolution(query: &str) -> Option<String> {
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "resolution")
+        .map(|(_, value)| value.into_owned())
+}
+
+/// Applies the cache policy to every response. `Vary` belongs to the CORS layer
+/// and is left alone.
+async fn cache_headers(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let query = request.uri().query().unwrap_or_default().to_string();
+    let mut response = next.run(request).await;
+    let value = cache_control(&method, &path, &query, response.status());
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static(value));
+    response
+}
+
 /// Builds the API router.
 ///
 /// CORS is a closed list. The endpoints answer cross-origin only for the origins
@@ -571,6 +622,7 @@ pub fn router(api: ApiState, allowed_origins: &[String]) -> Router {
         .route("/pools/{id}/history", get(get_history))
         .route("/pools/{id}/refresh", post(refresh_pool))
         .layer(cors)
+        .layer(middleware::from_fn(cache_headers))
         .with_state(api)
 }
 
@@ -629,5 +681,69 @@ mod tests {
             let _ = limiter.allow_pool_at(&format!("pool-{key}"), 1_000);
         }
         assert!(limiter.tracked_pools() <= PER_POOL_TRACKED_MAX);
+    }
+
+    #[test]
+    fn cache_policy_is_bounded_by_the_poll() {
+        let (get, ok) = (Method::GET, StatusCode::OK);
+        assert_eq!(
+            cache_control(&get, "/pools", "", ok),
+            "public, max-age=5, must-revalidate"
+        );
+        assert_eq!(
+            cache_control(&get, "/pools/0xabc", "", ok),
+            "public, max-age=5, must-revalidate"
+        );
+        assert_eq!(
+            cache_control(&get, "/pools/0xabc/history", "resolution=1m", ok),
+            "public, max-age=5, must-revalidate"
+        );
+        assert_eq!(
+            cache_control(&get, "/pools/0xabc/history", "resolution=1d", ok),
+            "public, max-age=15, must-revalidate"
+        );
+    }
+
+    #[test]
+    fn nothing_a_reader_acts_on_is_stored() {
+        assert_eq!(
+            cache_control(
+                &Method::POST,
+                "/pools/0xabc/refresh",
+                "",
+                StatusCode::ACCEPTED
+            ),
+            "no-store"
+        );
+        assert_eq!(
+            cache_control(&Method::GET, "/pools/0xabc", "", StatusCode::NOT_FOUND),
+            "no-store"
+        );
+        assert_eq!(
+            cache_control(
+                &Method::GET,
+                "/pools",
+                "cursor=bad",
+                StatusCode::BAD_REQUEST
+            ),
+            "no-store"
+        );
+        assert_eq!(
+            cache_control(&Method::GET, "/status", "", StatusCode::OK),
+            "no-store"
+        );
+        assert_eq!(
+            cache_control(&Method::OPTIONS, "/pools", "", StatusCode::OK),
+            "no-store"
+        );
+        assert_eq!(
+            cache_control(
+                &Method::GET,
+                "/pools",
+                "",
+                StatusCode::INTERNAL_SERVER_ERROR
+            ),
+            "no-store"
+        );
     }
 }
