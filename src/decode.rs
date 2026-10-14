@@ -1,8 +1,9 @@
 //! Pool state decode from the RPC account response.
 //!
 //! The Rust port of the SDK's `pool/decoding.ts` and `pool/reads.ts`. The pool
-//! stores ten value slots; reserves equal the vault balances of token0 and
-//! token1 minus the protocol pot.
+//! stores eleven value slots; reserves are the contract's stored accounting,
+//! and the vault is asserted to cover the reserves plus the protocol pot. A
+//! credit the contract did not create is never a reserve.
 
 use anyhow::{Context, Result, anyhow};
 use miden_node_proto::domain::account::{
@@ -94,17 +95,21 @@ pub fn decode_pool_state(
     let pot0 = pot[0].as_canonical_u64();
     let pot1 = pot[1].as_canonical_u64();
 
+    // Required: a pool deployed before the stored-reserves upgrade has no such
+    // slot, and its reserves cannot be recovered from the vault without
+    // misreading a stray credit.
+    let reserves = require_word(header, "reserves")?;
+    let reserve0 = reserves[0].as_canonical_u64();
+    let reserve1 = reserves[1].as_canonical_u64();
+
     let price0 = u128_word(slot_word(header, "price0_cumulative_last")?.unwrap_or_else(zero_word));
     let price1 = u128_word(slot_word(header, "price1_cumulative_last")?.unwrap_or_else(zero_word));
     let block_timestamp_last = scalar(header, "block_timestamp_last")?;
 
     let (vault0, vault1) = vault_balances(vault, token0_faucet, token1_faucet)?;
-    let reserve0 = vault0
-        .checked_sub(pot0)
-        .ok_or_else(|| anyhow!("vault balance of token0 is below the protocol pot"))?;
-    let reserve1 = vault1
-        .checked_sub(pot1)
-        .ok_or_else(|| anyhow!("vault balance of token1 is below the protocol pot"))?;
+    if vault0 < reserve0.saturating_add(pot0) || vault1 < reserve1.saturating_add(pot1) {
+        anyhow::bail!("vault does not cover the recorded reserves and protocol pot");
+    }
 
     Ok(PoolState {
         pool_id,

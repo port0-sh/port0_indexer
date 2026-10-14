@@ -211,8 +211,9 @@ that trips either gets `429` with `Retry-After`.
   protocol's share is carved out of the LP fee rather than added to the input.
 - Multiple blocks can coalesce between polls, so an activity is the net effect
   of the interval. Exact per-action events need `sync_transactions`.
-- Reserves equal the vault balances of token0 and token1 minus the protocol
-  pot, matching the contract's `get_reserves`.
+- Reserves are the pool's stored `reserves` word, matching the contract's
+  `get_reserves`. The vault is checked to cover the reserves plus the protocol
+  pot; a credit the contract did not create is never a reserve.
 - The vault is requested with the empty word as its `asset_vault_commitment`.
   The field is a "send my last known commitment" hint: omitting it means "do
   not include vault data", and the response then carries an empty asset list
