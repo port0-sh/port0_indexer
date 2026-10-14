@@ -95,9 +95,8 @@ pub fn decode_pool_state(
     let pot0 = pot[0].as_canonical_u64();
     let pot1 = pot[1].as_canonical_u64();
 
-    // Required: a pool deployed before the stored-reserves upgrade has no such
-    // slot, and its reserves cannot be recovered from the vault without
-    // misreading a stray credit.
+    // Required: without the slot, the reserves cannot be recovered from the
+    // vault without misreading a stray credit.
     let reserves = require_word(header, "reserves")?;
     let reserve0 = reserves[0].as_canonical_u64();
     let reserve1 = reserves[1].as_canonical_u64();
