@@ -79,8 +79,8 @@ Each summary also resolves display and configuration data from the chain:
 Token symbols are decoded with the protocol's `TokenSymbol` type. The app maps
 the schedule roots to note kinds through the SDK's compiled note scripts.
 
-The API answers cross-origin only for the origins in `INDEXER_ALLOWED_ORIGINS`,
-so a static app served from another origin must be listed there.
+An unknown pool id returns `404` on the detail, history, and refresh routes. An
+unknown history resolution returns `400`.
 
 ### Caching
 
