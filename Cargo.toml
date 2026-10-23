@@ -7,7 +7,7 @@ edition = "2024"
 anyhow = "1"
 axum = "0.8"
 dotenvy = "0.15"
-miden-node-proto = "0.17.3"
+miden-node-proto = "0.17.6"
 miden-objects = "0.17.1"
 miden-protocol = "0.17.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

@@ -2819,9 +2819,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-grpc-error-macro"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d99200668dcb44e6df020bccb508ed7450776b150978cfe15837ad97510bf6fd"
+checksum = "4d3446b4e142142330b56656b423cc71c903564c2776092440fa3613dfa5b757"
 dependencies = [
  "quote",
  "syn 2.0.119",
@@ -2829,9 +2829,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-persistence"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2a78e45b6f74aa380327b12ddf3cc800645cc32a98aa161446f5b1c07335a14e"
+checksum = "aeb536e6e08bec529dcde92c6ea4ee18b44c007da0e399955d62d4c02e2d9805"
 dependencies = [
  "miden-objects",
  "miden-protobuf",
@@ -2844,9 +2844,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0925caa9e4ff01add28e81fc2e4d2a04ae2c9487ecf95b17b594f083177003ab"
+checksum = "b292382f1081663088fb58b1b667eaa29c7e2e0ec998cfbc84920dd197751c79"
 dependencies = [
  "anyhow",
  "build-rs",
@@ -2876,9 +2876,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-proto-build"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9c8e64c1dae7548d86aa455e96544265bc522e70c4f09b2193c406e4226e2d3"
+checksum = "eaaeaddbb15256128bda160122e17a457a902a93575fce693ebe15ba2c93d648"
 dependencies = [
  "build-rs",
  "codegen",
@@ -2891,9 +2891,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-tracing"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a94552541cb741d41995b529f05487d97382c172ea8aaeede75bfe8313e44f11"
+checksum = "0a0ad501a7af93e642a0007e0e6c58d5b9b777b1598d510962f254c789e2b92c"
 dependencies = [
  "anyhow",
  "bytes",
@@ -2915,9 +2915,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-tracing-macro"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84936ae2dfab90400cc4d41528ff78db6019c5c7017b4bb0b604a7c16a227806"
+checksum = "bb32403f5288150ee20f757925f41e0f3e0943ea7f510e6ff1db3617e752b048"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2926,9 +2926,9 @@ dependencies = [
 
 [[package]]
 name = "miden-node-utils"
-version = "0.17.3"
+version = "0.17.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "192ef825ec7f063707996b92a5099b213e4546bee97356818ee7ff186f37e783"
+checksum = "0a69638239500b112517bd885739a30a4a2dd4779d92b82acd53a1d3c7e7f935"
 dependencies = [
  "anyhow",
  "backon",
