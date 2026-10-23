@@ -20,7 +20,7 @@ precedence, and a missing file is not an error.
 | `PORT0_REGISTRY_ID` | required | Registry account id, hex |
 | `INDEXER_LISTEN` | `127.0.0.1:8080` | HTTP listen address. Loopback by default, for an API behind a reverse proxy |
 | `INDEXER_ALLOWED_ORIGINS` | (empty) | Comma-separated origins allowed to read the API cross-origin. Empty means same-origin only; no wildcard is accepted |
-| `POOL_POLL_SECS` | `15` | Scheduler tick in seconds, clamped to `1..=5`; per-pool cadence is internal |
+| `POOL_POLL_SECS` | `5` | Scheduler tick in seconds, clamped to `1..=5`; per-pool cadence is internal |
 | `REGISTRY_POLL_SECS` | `60` | Registry poll interval |
 | `INDEXER_DB` | `port0_indexer.sqlite` | SQLite path; empty or `off` keeps the index in RAM only |
 | `INDEXER_SNAPSHOT_RETENTION` | (empty) | Empty prunes each resolution to its window; `all` keeps every bucket |

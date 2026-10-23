@@ -40,7 +40,9 @@ impl Config {
         // Loopback by default: the API is reached through a reverse proxy, and a
         // host that forgets to set this should not expose it on every interface.
         let listen = std::env::var("INDEXER_LISTEN").unwrap_or_else(|_| "127.0.0.1:8080".into());
-        let pool_poll = Duration::from_secs(env_secs("POOL_POLL_SECS", 15));
+        // Clamped to 5 below, so 5 is the effective default; 15 was a leftover from
+        // before per-pool tiers bounded the cadence.
+        let pool_poll = Duration::from_secs(env_secs("POOL_POLL_SECS", 5));
         let registry_poll = Duration::from_secs(env_secs("REGISTRY_POLL_SECS", 60));
         let db = std::env::var("INDEXER_DB").unwrap_or_else(|_| "port0_indexer.sqlite".into());
         let keep_all_snapshots = std::env::var("INDEXER_SNAPSHOT_RETENTION")

@@ -1,20 +1,12 @@
-//! Durable history in SQLite.
+//! Durable history in SQLite: the write-behind sink the HTTP API's history
+//! reads come from, and what a restart replays.
 //!
-//! The in-memory model stays the read path for the HTTP API; this is the
-//! write-behind sink and the history a restart replays from. Without it the
-//! series, the activity ring, and the yield window start empty on every start.
+//! Amounts are stored as TEXT end to end. SQLite INTEGER is signed 64-bit, and
+//! pool amounts are `u64` up to `2^63 - 1` and sometimes `u128`, so the decimal
+//! string the API already uses is the only lossless representation.
 //!
-//! Every amount is stored as TEXT. SQLite's INTEGER is a signed 64-bit value, so
-//! a `u64` above `2^63 - 1` cannot be stored in it and a `u128` never can; both
-//! appear in pool state. The API already sends amounts as decimal strings, and
-//! the database keeps that representation end to end, so nothing is silently
-//! reinterpreted between the two.
-//!
-//! Retention is bounded per resolution: a row older than the resolution's own
-//! window is deleted on every write cycle. The window defaults to the RAM caps
-//! (6 h of minutes, 48 h of five-minutes, 30 days of hours). Set
-//! `INDEXER_SNAPSHOT_RETENTION` to `all` to keep everything instead, which is
-//! what the storage arithmetic in the README prices.
+//! Retention deletes rows older than each resolution's window on every write
+//! cycle; `INDEXER_SNAPSHOT_RETENTION=all` keeps every bucket instead.
 
 use std::collections::HashMap;
 use std::path::Path;
