@@ -275,10 +275,16 @@ fn summary(
         state.reserve1,
         fee_apr_window_secs,
     );
+    // The reserves are in base units, so the ratio only means a price once the
+    // decimals cancel: 8-decimal ETH against 6-decimal USDCX is off by 100
+    // without the scale.
     let spot_price = if state.reserve0 == 0 {
         0.0
     } else {
-        state.reserve1 as f64 / state.reserve0 as f64
+        let d0 = token0_decimals.unwrap_or(0) as i32;
+        let d1 = token1_decimals.unwrap_or(0) as i32;
+        let scale = 10f64.powi(d0 - d1);
+        state.reserve1 as f64 / state.reserve0 as f64 * scale
     };
     PoolSummary {
         id: state.pool_id.to_hex(),
